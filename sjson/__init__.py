@@ -1,6 +1,7 @@
 """Module to parse SJSON files."""
 # coding=utf8
 # @author: Matthäus G. Chajdas
+# @author: paradigmsort
 # @license: 3-clause BSD
 
 import collections.abc
@@ -8,9 +9,8 @@ import collections
 import numbers
 import string
 import io
-from enum import Enum
 
-__version__ = '2.1.0'
+__version__ = '2.0.3'
 
 
 class MemoryInputStream:
@@ -139,12 +139,11 @@ def _consume(stream, what):
     stream.skip(what_len)
 
 
-def _skip_characters_and_whitespace(stream, num_char_to_skip):
+def _skip_characterse_and_whitespace(stream, num_char_to_skip):
     stream.skip(num_char_to_skip)
     return _skip_whitespace(stream)
 
-
-_WHITESPACE_SET = {b' ', b'\t', b'\n', b'\r'}
+_WHITESPACE_SET = set({b' ', b'\t', b'\n', b'\r'})
 
 
 def _is_whitespace(char):
@@ -184,8 +183,8 @@ def _skip_cpp_style_comment(stream):
 
 
 def _skip_whitespace(stream):
-    """skip whitespace. Returns the next character if a new position within the
-    stream was found; returns None if the end of the stream was hit."""
+    '''skip whitespace. Returns the next character if a new position within the
+    stream was found; returns None if the end of the stream was hit.'''
     while True:
         next_char = stream.peek(allow_end_of_file=True)
         if not _is_whitespace(next_char):
@@ -203,7 +202,6 @@ def _skip_whitespace(stream):
 
     return next_char
 
-
 _IDENTIFIER_SET = set(string.ascii_letters + string.digits + '_')
 
 
@@ -211,56 +209,26 @@ def _is_identifier(obj):
     return chr(obj[0]) in _IDENTIFIER_SET
 
 
-def _decode_escaped_character(char):
-    if char == b'b':
-        return b'\b'
-    elif char == b'n':
-        return b'\n'
-    elif char == b't':
-        return b'\t'
-    elif char == b'\\' or char == b'\"':
-        return char
-    else:
-        # If we get here, it's an invalid escape sequence. We will simply return
-        # it as-if it was not invalid (i.e. \l for instance will get turned
-        # into \\l)
-        return b'\\' + char
-
-
-class RawQuoteStyle(Enum):
-    Lua = 1
-    Python = 2
-
-
 def _decode_string(stream, allow_identifier=False):
-    # When we enter here, we either start with " or [, or there is no quoting
-    # enabled.
     _skip_whitespace(stream)
 
     result = bytearray()
 
-    is_quoted = stream.peek() == b'\"' or stream.peek() == b'['
+    is_quoted = stream.peek() == b'\"'
     if not allow_identifier and not is_quoted:
         raise ParseException('Quoted string expected', stream.get_location())
 
-    raw_quotes = None
-    # Try Python-style, """ delimited strings
-    if is_quoted and stream.peek(3) == b'\"\"\"':
-        stream.skip(3)
-        raw_quotes = RawQuoteStyle.Python
-    # Try Lua-style, [=[ delimited strings
-    elif is_quoted and stream.peek(3) == b'[=[':
-        stream.skip(3)
-        raw_quotes = RawQuoteStyle.Lua
-    elif is_quoted and stream.peek() == b'\"':
-        stream.skip()
-    elif is_quoted:
-        #
-        raise ParseException('Invalid quoted string, must start with ",'
-                             '""", or [=[',
-                             stream.get_location())
+    raw_quotes = False
+    if is_quoted:
+        if stream.peek(3) == b'"""':
+            raw_quotes = True
+            stream.skip(3)
+        else:
+            stream.skip()
 
-    parse_as_identifier = not is_quoted
+    parse_as_identifier = False
+    if not is_quoted:
+        parse_as_identifier = True
 
     while True:
         next_char = stream.peek()
@@ -268,35 +236,11 @@ def _decode_string(stream, allow_identifier=False):
             break
 
         if raw_quotes:
-            if raw_quotes == RawQuoteStyle.Python and \
-                    next_char == b'\"' and stream.peek(3) == b'\"\"\"':
-                # This is a tricky case -- we're in a """ quoted string, and
-                # we spotted three consecutive """. This could mean we're at the
-                # end, but it doesn't have to be -- we actually need to check
-                # all the cases below:
-                #   * """: simple case, just end here
-                #   * """": A single quote inside the string,
-                #     followed by the end marker
-                #   * """"": A double double quote inside the string,
-                #     followed by the end marker
-                # Note that """""" is invalid, no matter what follows
-                # afterwards, as the first group of three terminates the string,
-                # and then we'd have an unrelated string afterwards. We don't
-                # concat strings automatically so this will trigger an error
-                # Start with longest match, as the other is prefix this has
-                # to be the first check
-                if stream.peek(5, allow_end_of_file=True) == b'\"\"\"\"\"':
-                    result += b'\"\"'
-                    stream.skip(5)
-                    break
-                elif stream.peek(4, allow_end_of_file=True) == b'\"\"\"\"':
-                    result += next_char
-                    stream.skip(4)
-                    break
-                stream.skip(3)
-                break
-            elif raw_quotes == RawQuoteStyle.Lua and \
-                    next_char == b']' and stream.peek(3) == b']=]':
+            # SGG allows unescaped quotation marks as the last character in a block quote.
+            # For example, see Game/Text/pl/CodexText.pl.sjson
+            # In this case, there will be 4 (or more) quotation marks in a row, and the block
+            # quote ends with the _last_ 3, not the first 3.
+            if stream.peek(3) == b'"""' and stream.peek(4) != b'""""':
                 stream.skip(3)
                 break
             else:
@@ -306,17 +250,16 @@ def _decode_string(stream, allow_identifier=False):
             if next_char == b'\"':
                 stream.read()
                 break
-            elif next_char == b'\\':
-                stream.skip()
-                result += _decode_escaped_character(stream.read())
             else:
                 result += next_char
                 stream.skip()
 
-    return str(result, encoding='utf-8')
+    if raw_quotes:
+      return result # defer encoding so we can tell the difference
+    else:
+      return str(result, encoding='utf-8')
 
-
-_NUMBER_SEPARATOR_SET = _WHITESPACE_SET.union({b',', b']', b'}', None})
+_NUMBER_SEPARATOR_SET = _WHITESPACE_SET.union(set({b',', b']', b'}', None}))
 
 
 def _decode_number(stream, next_char):
@@ -354,7 +297,9 @@ def _decode_dict(stream, delimited=False):
     from collections import OrderedDict
     result = OrderedDict()
 
-    if stream.peek() == b'{':
+    next_char = _skip_whitespace(stream)
+
+    if next_char == b'{':
         stream.skip()
 
     next_char = _skip_whitespace(stream)
@@ -377,7 +322,7 @@ def _decode_dict(stream, delimited=False):
 
         next_char = _skip_whitespace(stream)
         if next_char == b',':
-            next_char = _skip_characters_and_whitespace(stream, 1)
+            next_char = _skip_characterse_and_whitespace(stream, 1)
 
     return result
 
@@ -385,7 +330,7 @@ def _decode_dict(stream, delimited=False):
 def _parse_list(stream):
     result = []
     # skip '['
-    next_char = _skip_characters_and_whitespace(stream, 1)
+    next_char = _skip_characterse_and_whitespace(stream, 1)
 
     while True:
         if next_char == b']':
@@ -397,7 +342,7 @@ def _parse_list(stream):
 
         next_char = _skip_whitespace(stream)
         if next_char == b',':
-            next_char = _skip_characters_and_whitespace(stream, 1)
+            next_char = _skip_characterse_and_whitespace(stream, 1)
 
     return result
 
@@ -419,13 +364,7 @@ def _parse(stream):
     elif next_char == b'\"':
         return _decode_string(stream)
     elif next_char == b'[':
-        peek = stream.peek(2, allow_end_of_file=False)
-        # second lookup character for [=[]=] raw literal strings
-        next_char_2 = peek[1:2]
-        if next_char_2 != b'=':
-            return _parse_list(stream)
-        elif next_char_2 == b'=':
-            return _decode_string(stream)
+        return _parse_list(stream)
 
     try:
         return _decode_number(stream, next_char)
@@ -466,32 +405,7 @@ def dump(obj, fp, indent=None):
         fp.write(e)
 
 
-_ESCAPE_CHARACTER_SET = {'\n': '\\n', '\b': '\\b', '\t': '\\t', '\"': '\\"'}
-
-
-def _escape_string(obj, quote=True):
-    """Escape a string.
-
-    If quote is set, the string will be returned with quotation marks at the
-    beginning and end. If quote is set to false, quotation marks will be only
-    added if needed(that is, if the string is not an identifier.)"""
-    if any([c not in _IDENTIFIER_SET for c in obj]):
-        # String must be quoted, even if quote was not requested
-        quote = True
-
-    if quote:
-        yield '"'
-
-    for key, value in _ESCAPE_CHARACTER_SET.items():
-        obj = obj.replace(key, value)
-
-    yield obj
-
-    if quote:
-        yield '"'
-
-
-def _encode(obj, separators=(', ', '\n', ' = '), indent=0, level=0):
+def _encode(obj, separators=('', '\n', ' = '), indent=0, level=0):
     if obj is None:
         yield 'null'
     # Must check for true, false before number, as boolean is an instance of
@@ -504,7 +418,14 @@ def _encode(obj, separators=(', ', '\n', ' = '), indent=0, level=0):
         yield str(obj)
     # Strings are also Sequences, but we don't want to encode as lists
     elif isinstance(obj, str):
-        yield from _escape_string(obj)
+        yield '"'
+        yield obj
+        yield '"'
+    # Raw string
+    elif isinstance(obj, bytearray):
+        yield '"""'
+        yield str(obj, 'utf-8')
+        yield '"""'
     elif isinstance(obj, collections.abc.Sequence):
         yield from _encode_list(obj, separators, indent, level)
     elif isinstance(obj, collections.abc.Mapping):
@@ -517,8 +438,28 @@ def _indent(level, indent):
     return indent * level
 
 
+_ESCAPE_CHARACTER_SET = {'\n': '\\n', '\b': '\\b', '\t': '\\t', '\"': '\\"'}
+
+
 def _encode_key(k):
-    yield from _escape_string(k, False)
+    """Encode a key.
+
+    Quotation marks will be only added if needed."""
+
+    quote=False
+    if any([c not in _IDENTIFIER_SET for c in k]):
+        quote = True
+
+    if quote:
+        yield '"'
+
+    for key, value in _ESCAPE_CHARACTER_SET.items():
+        k = k.replace(key, value)
+
+    yield k
+
+    if quote:
+        yield '"'
 
 
 def _encode_list(obj, separators, indent, level):
@@ -535,18 +476,19 @@ def _encode_list(obj, separators, indent, level):
 
 def _encode_dict(obj, separators, indent, level):
     if level > 0:
-        yield '{\n'
+        yield '\n'
+    yield _indent(level, indent)
+    yield '{\n'
     first = True
     for key, value in obj.items():
         if first:
             first = False
         else:
             yield '\n'
-        yield _indent(level, indent)
+        yield _indent(level+1, indent)
         yield from _encode_key(key)
         yield separators[2]
         yield from _encode(value, separators, indent, level+1)
     yield '\n'
-    yield _indent(level-1, indent)
-    if level > 0:
-        yield '}'
+    yield _indent(level, indent)
+    yield '}'
